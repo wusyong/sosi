@@ -1,22 +1,64 @@
 use std::collections::{hash_map::Entry as MapEntry, HashMap};
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-use fnv::FnvBuildHasher;
+use fnv::{FnvBuildHasher, FnvHasher};
 
 use crate::Error;
 
-/// A cache interface which shards cache by hash of keys.
+/// A LRU cache implementation that contains several cache shards based on given number of shard bits.
+/// If it's not provided, the cache will create the shards based on the size of capacity. The least
+/// recent used entry in each shard would be evicted if the shard capacity is full.
+///
+/// Since this is a cache for specific usage, the key is defined as `usize`, and the size of each
+/// entry is left to users to define. When inserting an entry, it also requires a charge argument
+/// which usually would be the size of the entry value.
 #[derive(Debug)]
 pub struct Cache<T> {
     shards: Vec<LRUCache<T>>,
-    capacity: usize,
-    num_shard_bits: u8,
+    pub capacity: usize, // TODO make struct field private and provide get method instead. Same as LRUCache.
+    pub num_shard_bits: u8,
 }
 
 impl<T> Cache<T> {
     /// Construct a new `Cache`.
     pub fn new(capacity: usize) -> CacheBuilder<T> {
         CacheBuilder::new(capacity)
+    }
+
+    /// Insert a key-value pair into the cache. Unlike normal cache, it also requires a `charge`
+    /// argument which usually serves as the size of the pair. The remaining capacity of the cache
+    /// would be `capacity - charge` after the insertion.
+    pub fn insert(&mut self, key: usize, val: T, charge: usize) -> Option<T> {
+        let idx = self.get_shard(key);
+        self.shards[idx].insert(key, val, charge)
+    }
+
+    /// Lookup an entry in the cache with given key and turn mutable reference of its value if present.
+    /// This will also update the entry to most recent used entry of the shard cache.
+    pub fn lookup(&mut self, key: usize) -> Option<&mut T> {
+        let idx = self.get_shard(key);
+        self.shards[idx].lookup(key)
+    }
+
+    /// Remove a entry from the cache and return the value.
+    pub fn erase(&mut self, key: usize) -> Option<T> {
+        let idx = self.get_shard(key);
+        self.shards[idx].erase(key)
+    }
+
+    /// Get total usage of the cache.
+    pub fn get_usage(&self) -> usize {
+        self.shards.iter().fold(0, |acc, shard| acc + shard.usage)
+    }
+
+    fn get_shard(&self, key: usize) -> usize {
+        let mut hash = FnvHasher::default();
+        key.hash(&mut hash);
+        match self.num_shard_bits {
+            0 => 0,
+            n => (hash.finish() >> (64 - n)) as usize,
+        }
     }
 }
 
@@ -47,7 +89,8 @@ impl<T> CacheBuilder<T> {
         Ok(self)
     }
 
-    /// Consume the instance and build the `Cache`.
+    /// Consume the instance and build the `Cache`. If num_shard_bits isn't provided, it will
+    /// determine the shard number based on capacity with size of 512KB for each shard.
     pub fn build(self) -> Cache<T> {
         let num_shard_bits = self
             .num_shard_bits
@@ -70,6 +113,7 @@ fn get_default_cache_shard_bits(capacity: usize) -> u8 {
     let mut num_shard_bits = 0;
     let min_shard_size = 512 * 1024;
     let mut num_shards = capacity / min_shard_size;
+    num_shards >>= 1;
     while num_shards > 0 {
         num_shard_bits += 1;
         if num_shard_bits >= 6 {
@@ -99,14 +143,14 @@ pub struct LRUCache<T> {
     /// Index of the last entry. If the cache is empty, ignore this field.
     tail: usize,
     /// Capacity of the cache.
-    capacity: usize,
+    pub capacity: usize,
     /// Current memory space that has been allocated.
-    usage: usize,
+    pub usage: usize,
 }
 
-/// An entry in an LRUCacheShard.
+/// An entry in an LRUCache.
 #[derive(Debug, Clone)]
-pub struct Entry<T> {
+struct Entry<T> {
     val: T,
     /// Index of the previous entry. If this entry is the head, ignore this field.
     prev: usize,

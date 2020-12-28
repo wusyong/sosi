@@ -77,7 +77,7 @@ fn get_default_cache_shard_bits(capacity: usize) -> u8 {
         }
         num_shards >>= 1;
     }
-    return num_shard_bits;
+    num_shard_bits
 }
 
 /// A LRU cache builds on top of the HashMap from standard library.
@@ -119,14 +119,13 @@ pub struct Entry<T> {
 impl<T> LRUCache<T> {
     /// Create a new LRU cache that can hold `capacity` of memory.
     pub fn new(capacity: usize) -> Self {
-        let cache = LRUCache {
+        LRUCache {
             entries: HashMap::default(),
             head: 0,
             tail: 0,
             capacity,
             usage: 0,
-        };
-        cache
+        }
     }
 
     /// Lookup an entry in the list with given key and turn its value if present. This will move
@@ -143,6 +142,11 @@ impl<T> LRUCache<T> {
     /// This item becomes the front (most-recently-used) item in the cache.  If the cache is full,
     /// the back (least-recently-used) item will be removed.
     pub fn insert(&mut self, key: usize, val: T, charge: usize) -> Option<T> {
+        self.usage += charge;
+        while self.usage > self.capacity {
+            self.remove_lru();
+        }
+
         let (old, old_charge) = match self.entries.entry(key) {
             MapEntry::Occupied(mut e) => {
                 let old_val = e.insert(Entry {
@@ -165,7 +169,7 @@ impl<T> LRUCache<T> {
         };
         self.push_front(key);
 
-        self.usage += charge + old_charge;
+        self.usage += old_charge;
         while self.usage > self.capacity {
             self.remove_lru();
         }
@@ -174,11 +178,15 @@ impl<T> LRUCache<T> {
 
     /// Remove a entry from the cache.
     pub fn erase(&mut self, key: usize) -> Option<T> {
-        self.entries.remove(&key).map(|old_entry| {
-            self.capacity -= old_entry.charge;
+        if self.entries.contains_key(&key) {
             self.evict(key);
-            old_entry.val
-        })
+            self.entries.remove(&key).map(|old_entry| {
+                self.usage -= old_entry.charge;
+                old_entry.val
+            })
+        } else {
+            None
+        }
     }
 
     /// Remove the last entry from the cache.
@@ -187,9 +195,23 @@ impl<T> LRUCache<T> {
             let old_key = self.tail;
             let new_tail = old_tail.prev;
             self.tail = new_tail;
-            self.capacity -= old_tail.charge;
+            self.usage -= old_tail.charge;
             (old_key, old_tail.val)
         })
+    }
+
+    /// Iterate over the contents of this cache.
+    pub fn iter(&self) -> Iter<T> {
+        Iter {
+            pos: self.head,
+            done: self.entries.is_empty(),
+            cache: self,
+        }
+    }
+
+    /// Returns the number of elements in the cache.
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
     /// Touch a given entry, putting it first in the list.
@@ -239,5 +261,41 @@ impl<T> LRUCache<T> {
                 .prev = i;
         }
         self.head = i;
+    }
+}
+
+/// Mutable iterator over values in an LRUCache, from most-recently-used to least-recently-used.
+#[derive(Debug)]
+pub struct Iter<'a, T> {
+    cache: &'a LRUCache<T>,
+    pos: usize,
+    done: bool,
+}
+
+impl<'a, T> Iterator for Iter<'a, T>
+where
+    T: 'a,
+{
+    type Item = (usize, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        // Use a raw pointer because the compiler doesn't know that subsequent calls can't alias.
+        //let entry = unsafe { &mut *(&mut self.cache.entries[self.pos as usize] as *mut Entry<T>) };
+        let (key, entry) = self
+            .cache
+            .entries
+            .get_key_value(&self.pos)
+            .expect("Invalid entry access");
+
+        if self.pos == self.cache.tail {
+            self.done = true;
+        }
+        self.pos = entry.next;
+
+        Some((*key, &entry.val))
     }
 }

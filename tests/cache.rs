@@ -79,3 +79,5 @@ fn erase() {
     let erased = cache.erase(100);
     assert_eq!(erased, None);
 }
+
+// TODO Add a test of double insert the same key and then lookup

@@ -64,7 +64,9 @@ impl<T> Cache<T> {
 
     /// Get total usage of the cache.
     pub fn get_usage(&self) -> usize {
-        self.shards.iter().fold(0, |acc, shard| acc + shard.lock().unwrap().usage)
+        self.shards
+            .iter()
+            .fold(0, |acc, shard| acc + shard.lock().unwrap().usage)
     }
 
     fn get_shard(&self, key: usize) -> usize {
@@ -214,6 +216,7 @@ impl<T> LRUCache<T> {
                     next: e.get().next,
                     charge,
                 });
+                self.touch_index(key);
                 (Some(old_val.val), old_val.charge)
             }
             MapEntry::Vacant(e) => {
@@ -223,10 +226,10 @@ impl<T> LRUCache<T> {
                     next: 0,
                     charge,
                 });
+                self.push_front(key);
                 (None, 0)
             }
         };
-        self.push_front(key);
 
         self.usage += old_charge;
         while self.usage > self.capacity {

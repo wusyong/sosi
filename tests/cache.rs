@@ -15,7 +15,7 @@ fn default_shard_bits() {
 #[test]
 fn usage() {
     let capacity = 100000;
-    let mut cache = Cache::new(capacity).num_shard_bits(8).unwrap().build();
+    let cache = Cache::new(capacity).num_shard_bits(8).unwrap().build();
     assert_eq!(cache.get_usage(), 0);
 
     let mut usage = 0;
@@ -38,33 +38,33 @@ fn usage() {
 
 #[test]
 fn hit_and_miss() {
-    let mut cache = Cache::new(2).build();
+    let cache = Cache::new(2).build();
 
     cache.insert(100, 101, 1);
-    assert_eq!(cache.lookup(100), Some(&mut 101));
-    assert_eq!(cache.lookup(200), None);
-    assert_eq!(cache.lookup(300), None);
+    assert_eq!(cache.lookup(100).value(), Some(&mut 101));
+    assert_eq!(cache.lookup(200).value(), None);
+    assert_eq!(cache.lookup(300).value(), None);
 
     cache.insert(200, 201, 1);
-    assert_eq!(cache.lookup(100), Some(&mut 101));
-    assert_eq!(cache.lookup(200), Some(&mut 201));
-    assert_eq!(cache.lookup(300), None);
+    assert_eq!(cache.lookup(100).value(), Some(&mut 101));
+    assert_eq!(cache.lookup(200).value(), Some(&mut 201));
+    assert_eq!(cache.lookup(300).value(), None);
 
     cache.insert(100, 102, 1);
     // Lookup 200 first because we don't want to reorder the cache after assert.
-    assert_eq!(cache.lookup(200), Some(&mut 201));
-    assert_eq!(cache.lookup(100), Some(&mut 102));
-    assert_eq!(cache.lookup(300), None);
+    assert_eq!(cache.lookup(200).value(), Some(&mut 201));
+    assert_eq!(cache.lookup(100).value(), Some(&mut 102));
+    assert_eq!(cache.lookup(300).value(), None);
 
     cache.insert(300, 301, 1);
-    assert_eq!(cache.lookup(100), Some(&mut 102));
-    assert_eq!(cache.lookup(200), None);
-    assert_eq!(cache.lookup(300), Some(&mut 301));
+    assert_eq!(cache.lookup(100).value(), Some(&mut 102));
+    assert_eq!(cache.lookup(200).value(), None);
+    assert_eq!(cache.lookup(300).value(), Some(&mut 301));
 }
 
 #[test]
 fn erase() {
-    let mut cache = Cache::new(2).build();
+    let cache = Cache::new(2).build();
 
     let erased = cache.erase(200);
     assert_eq!(erased, None);
@@ -72,9 +72,9 @@ fn erase() {
     cache.insert(100, 101, 1);
     cache.insert(200, 201, 1);
     let erased = cache.erase(100);
-    assert_eq!(cache.lookup(100), None);
+    assert_eq!(cache.lookup(100).value(), None);
     assert_eq!(erased, Some(101));
-    assert_eq!(cache.lookup(200), Some(&mut 201));
+    assert_eq!(cache.lookup(200).value(), Some(&mut 201));
 
     let erased = cache.erase(100);
     assert_eq!(erased, None);

@@ -1,10 +1,22 @@
 use std::collections::{hash_map::Entry as MapEntry, HashMap};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::sync::{Mutex, MutexGuard};
 
 use fnv::{FnvBuildHasher, FnvHasher};
 
 use crate::Error;
+
+/// A reference of the incoming lookup entry. This type is created by `lookup` method from `Cache`.
+pub struct LookupRef<'a, T>(MutexGuard<'a, LRUCache<T>>, usize);
+
+impl<'a, T> LookupRef<'a, T> {
+    /// Get the value of the lookup reference and actually update the entry to the head of its
+    /// cache shard.
+    pub fn value(&mut self) -> Option<&mut T> {
+        self.0.lookup(self.1)
+    }
+}
 
 /// A LRU cache implementation that contains several cache shards based on given number of shard bits.
 /// If it's not provided, the cache will create the shards based on the size of capacity. The least
@@ -15,7 +27,7 @@ use crate::Error;
 /// which usually would be the size of the entry value.
 #[derive(Debug)]
 pub struct Cache<T> {
-    shards: Vec<LRUCache<T>>,
+    shards: Vec<Mutex<LRUCache<T>>>,
     pub capacity: usize, // TODO make struct field private and provide get method instead. Same as LRUCache.
     pub num_shard_bits: u8,
 }
@@ -29,27 +41,30 @@ impl<T> Cache<T> {
     /// Insert a key-value pair into the cache. Unlike normal cache, it also requires a `charge`
     /// argument which usually serves as the size of the pair. The remaining capacity of the cache
     /// would be `capacity - charge` after the insertion.
-    pub fn insert(&mut self, key: usize, val: T, charge: usize) -> Option<T> {
+    pub fn insert(&self, key: usize, val: T, charge: usize) -> Option<T> {
         let idx = self.get_shard(key);
-        self.shards[idx].insert(key, val, charge)
+        self.shards[idx].lock().unwrap().insert(key, val, charge)
     }
 
     /// Lookup an entry in the cache with given key and turn mutable reference of its value if present.
-    /// This will also update the entry to most recent used entry of the shard cache.
-    pub fn lookup(&mut self, key: usize) -> Option<&mut T> {
+    /// Since it's impossible to get a temporary reference from inner MutexGuard of each shard,
+    /// This method returns a reference type instead. To get the actual value and update the entry
+    /// to the head of its cache shard, pass `value()` method after this call.
+    pub fn lookup(&self, key: usize) -> LookupRef<'_, T> {
         let idx = self.get_shard(key);
-        self.shards[idx].lookup(key)
+        let guard = self.shards[idx].lock().unwrap();
+        LookupRef(guard, key)
     }
 
     /// Remove a entry from the cache and return the value.
-    pub fn erase(&mut self, key: usize) -> Option<T> {
+    pub fn erase(&self, key: usize) -> Option<T> {
         let idx = self.get_shard(key);
-        self.shards[idx].erase(key)
+        self.shards[idx].lock().unwrap().erase(key)
     }
 
     /// Get total usage of the cache.
     pub fn get_usage(&self) -> usize {
-        self.shards.iter().fold(0, |acc, shard| acc + shard.usage)
+        self.shards.iter().fold(0, |acc, shard| acc + shard.lock().unwrap().usage)
     }
 
     fn get_shard(&self, key: usize) -> usize {
@@ -99,7 +114,7 @@ impl<T> CacheBuilder<T> {
         let per_shard = (self.capacity + (num_shards - 1)) / num_shards;
         let mut shards = Vec::new();
         for _ in 0..num_shards {
-            shards.push(LRUCache::new(per_shard));
+            shards.push(Mutex::new(LRUCache::new(per_shard)));
         }
         Cache {
             shards,

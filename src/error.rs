@@ -16,3 +16,24 @@ pub enum Error {
     #[error("the cache cannot be sharded into too many pieces. Maximum is 20.")]
     TooManyShards,
 }
+
+#[derive(Debug)]
+pub enum Severity {
+    None,
+    SoftError,
+    HardError,
+    FatalError,
+    UnrecoverableError,
+}
+
+#[derive(Error, Debug)]
+pub enum StatusError {
+    #[error("Not Found: {1}")]
+    NotFound(Severity, String),
+    #[error("Busy: {1}")]
+    Busy(Severity, String),
+    #[error("Expired: {1}")]
+    Expired(Severity, String),
+    #[error("Try Again: {1}")]
+    TryAgain(Severity, String),
+}

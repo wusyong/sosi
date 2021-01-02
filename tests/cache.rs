@@ -14,14 +14,14 @@ fn default_shard_bits() {
 
 #[test]
 fn usage() {
-    let capacity = 100000;
-    let cache = Cache::new(capacity).num_shard_bits(8).unwrap().build();
+    let capacity = 1000;
+    let cache = Cache::new(capacity).num_shard_bits(3).unwrap().build();
     assert_eq!(cache.get_usage(), 0);
 
     let mut usage = 0;
     let val = "abcde";
     let kv_size = 8 + 5;
-    for i in 0..100 {
+    for i in 0..10 {
         cache.insert(i, val, kv_size);
         usage += kv_size;
     }
@@ -32,8 +32,7 @@ fn usage() {
         cache.insert(i, val, kv_size);
     }
 
-    let lower = (capacity as f32 * 0.95) as usize;
-    assert!((lower..capacity).contains(&cache.get_usage()));
+    assert!(capacity >= cache.get_usage());
 }
 
 #[test]

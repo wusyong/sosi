@@ -11,8 +11,8 @@ pub enum Error {
     //    expected: String,
     //    found: String,
     //},
-    #[error("invalid high_pri_pool_ratio. Must in range of (0.0..1.0)")]
-    InvalidRatio,
+    #[error("invalid block creation.")]
+    InvalidBlock,
     #[error("the cache cannot be sharded into too many pieces. Maximum is 20.")]
     TooManyShards,
 }

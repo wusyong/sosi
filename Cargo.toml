@@ -10,6 +10,8 @@ edition = "2018"
 [dependencies]
 thiserror = "1.0"
 fnv = "1.0"
+# Use VarInt only, FixedInt is unsound.
+integer-encoding = "2.1"
 
 [dev-dependencies]
 criterion = "0.3"

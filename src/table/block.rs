@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::iter::Iterator;
 use std::mem::size_of;
 
@@ -82,7 +83,68 @@ impl<'a> BlockIter<'a> {
         &self.key
     }
 
-    // TODO Seek
+    /// Seek the first entry in block with key>= target and returns its value.
+    pub fn seek(&mut self, target: &[u8]) -> Option<&[u8]> {
+        let data = &self.block.data;
+        let mut left = 0;
+        let mut right = self.block.num_restarts - 1;
+        // Binary search in restart array to find the last restart point with key < target
+        while left < right {
+            let mid = (left + right + 1) / 2;
+            let region_offset = self.get_restart_point(mid);
+
+            let mut i = 0;
+            let (shared, len) =
+                usize::decode_var(&data[self.current..]).expect("SHARED data is corrupted.");
+            i += len;
+            let (non_shared, len) = usize::decode_var(&data[self.current + i..])
+                .expect("NON_SHARED data is corrupted.");
+            i += len;
+            let (_, len) =
+                usize::decode_var(&data[self.current + i..]).expect("VALUE_LEN data is corrupted.");
+            i += len;
+
+            let key_offset = region_offset + i;
+            let key_len = shared + non_shared;
+            let key = &data[key_offset..key_offset + key_len];
+            if let Ordering::Less = key.cmp(target) {
+                left = mid;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        // Linear search (within restart block) for first key >= target
+        self.seek_to_restart_point(left);
+        loop {
+            if !self.valid() {
+                self.current = self.block.restarts;
+                self.restart_index = self.block.num_restarts;
+                return None;
+            }
+
+            if let Ordering::Less = self.key.as_slice().cmp(target) {
+                self.parse_entry();
+            } else {
+                return Some(self.value);
+            }
+        }
+    }
+
+    /// Seek to first entry in the block.
+    pub fn seek_to_first(&mut self) -> &[u8] {
+        self.seek_to_restart_point(0);
+        self.value
+    }
+
+    /// Seek to last entry in the block.
+    pub fn seek_to_last(&mut self) -> &[u8] {
+        self.seek_to_restart_point(self.block.num_restarts - 1);
+        while self.valid() {
+            self.parse_entry();
+        }
+        self.value
+    }
 
     #[inline]
     fn valid(&self) -> bool {
@@ -94,20 +156,23 @@ impl<'a> BlockIter<'a> {
     #[inline]
     fn parse_entry(&mut self) {
         let mut i = 0;
+        let data = &self.block.data;
         let (shared, len) =
-            usize::decode_var(&self.block.data[self.current..]).expect("SHARED data is corrupted.");
+            usize::decode_var(&data[self.current..]).expect("SHARED data is corrupted.");
         i += len;
-        let (non_shared, len) = usize::decode_var(&self.block.data[self.current + i..])
-            .expect("NON_SHARED data is corrupted.");
+        let (non_shared, len) =
+            usize::decode_var(&data[self.current + i..]).expect("NON_SHARED data is corrupted.");
         i += len;
-        let (value_len, len) = usize::decode_var(&self.block.data[self.current + i..])
-            .expect("VALUE_LEN data is corrupted.");
+        let (value_len, len) =
+            usize::decode_var(&data[self.current + i..]).expect("VALUE_LEN data is corrupted.");
         i += len;
+        // TODO add restart_offset check
 
         // Parse the key
+        let key_offset = self.current + i;
         let key_len = shared + non_shared;
         self.key.resize(key_len, 0);
-        let data = &self.block.data[key_len..key_len + non_shared];
+        let data = &self.block.data[key_offset..key_offset + non_shared];
         for i in shared..key_len {
             self.key[i] = data[i - shared];
         }
@@ -137,6 +202,7 @@ impl<'a> BlockIter<'a> {
         self.key.clear();
         self.restart_index = index;
         self.current = self.get_restart_point(index);
+        self.parse_entry();
     }
 }
 

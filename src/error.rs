@@ -13,6 +13,8 @@ pub enum Error {
     //},
     #[error("invalid block creation.")]
     InvalidBlock,
+    #[error("[Block Builder] Inserted Key should be greater than previous key.")]
+    InvalidKey,
     #[error("the cache cannot be sharded into too many pieces. Maximum is 20.")]
     TooManyShards,
 }

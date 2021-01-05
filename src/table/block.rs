@@ -1,8 +1,8 @@
-use std::cmp::Ordering;
+use std::cmp::{min, Ordering};
 use std::iter::Iterator;
 use std::mem::size_of;
 
-use integer_encoding::VarInt;
+use integer_encoding::{VarInt, VarIntWriter};
 
 use crate::Error;
 
@@ -25,8 +25,9 @@ pub struct Block {
 }
 
 impl Block {
-    // TODO Use block builder instead.
-    pub fn new(content: Vec<u8>) -> Result<Self, Error> {
+    // TODO add another vesion with checks?
+    /// Create a Black from raw bytes.
+    pub fn from_raw(content: Vec<u8>) -> Result<Self, Error> {
         let len = content.len();
         if len < U32_SIZE {
             return Err(Error::InvalidBlock);
@@ -40,7 +41,7 @@ impl Block {
             content[idx + 3],
         ];
         let num_restarts = u32::from_le_bytes(bytes) as usize;
-        let max_restarts = (len - U32_SIZE) / 1;
+        let max_restarts = (len - U32_SIZE) / U32_SIZE;
 
         if num_restarts as usize <= max_restarts {
             return Ok(Self {
@@ -57,10 +58,93 @@ impl Block {
         BlockIter {
             block: &self,
             current: 0,
+            prev: 0,
             restart_index: 0,
             key: Vec::new(),
             value: &[],
         }
+    }
+}
+
+pub struct BlockBuilder {
+    block_restart_interval: usize,
+    /// Destination buffer
+    buffer: Vec<u8>,
+    /// Restart points
+    restarts: Vec<u32>,
+    /// Number of entries emitted since restart
+    counter: usize,
+    last_key: Vec<u8>,
+}
+
+impl BlockBuilder {
+    pub fn new(block_restart_interval: usize) -> Self {
+        assert!(block_restart_interval > 0);
+        Self {
+            block_restart_interval,
+            buffer: vec![],
+            restarts: vec![0],
+            counter: 0,
+            last_key: vec![],
+        }
+    }
+
+    pub fn size_estimate(&self) -> usize {
+        self.buffer.len() + self.restarts.len() * 4 + U32_SIZE
+    }
+
+    pub fn add(mut self, key: &[u8], value: &[u8]) -> Result<Self, Error> {
+        if !self.buffer.is_empty() && key.cmp(&self.last_key) != Ordering::Greater {
+            return Err(Error::InvalidKey);
+        }
+
+        let mut shared = 0;
+        if self.counter < self.block_restart_interval {
+            // See how much sharing to do with previous string
+            let min_len = min(self.last_key.len(), key.len());
+            while shared < min_len && self.last_key[shared] == key[shared] {
+                shared += 1;
+            }
+        } else {
+            // Restart compression
+            self.restarts.push(self.buffer.len() as u32);
+            self.counter = 0;
+        }
+        let non_shared = key.len() - shared;
+
+        // Add |SHARED|NON_SHARED|VALUE_LEN| to buffer
+        self.buffer
+            .write_varint(shared)
+            .expect("Fail to write SHARED");
+        self.buffer
+            .write_varint(non_shared)
+            .expect("Fail to write NON_SHARED");
+        self.buffer
+            .write_varint(value.len())
+            .expect("Fail to write VALUE_LEN");
+        // Add key delta to buffer followed by value
+        self.buffer.extend_from_slice(&key[shared..]);
+        self.buffer.extend_from_slice(value);
+        // Update state
+        self.last_key.clear();
+        self.last_key.extend_from_slice(key);
+        self.counter += 1;
+
+        Ok(self)
+    }
+
+    pub fn finish(mut self) -> Result<Block, Error> {
+        self.buffer.reserve(self.restarts.len() * 4 + 4);
+
+        // Add RESTARTS
+        let restarts_len = self.restarts.len() as u32;
+        for r in self.restarts {
+            self.buffer.extend_from_slice(&r.to_le_bytes());
+        }
+        // Add N_RESTARTS
+        self.buffer.extend_from_slice(&restarts_len.to_le_bytes());
+
+        Block::from_raw(self.buffer)
     }
 }
 
@@ -70,6 +154,7 @@ pub struct BlockIter<'a> {
     block: &'a Block,
     /// Offset of current entry in `data`.
     current: usize,
+    prev: usize,
     /// Index of restart block in which current_offset falls.
     restart_index: usize,
     key: Vec<u8>,
@@ -118,9 +203,7 @@ impl<'a> BlockIter<'a> {
         self.seek_to_restart_point(left);
         loop {
             if !self.valid() {
-                self.current = self.block.restarts;
-                self.restart_index = self.block.num_restarts;
-                return None;
+                return Some(self.value);
             }
 
             if let Ordering::Less = self.key.as_slice().cmp(target) {
@@ -181,7 +264,8 @@ impl<'a> BlockIter<'a> {
         let value_offset = self.current + i + non_shared;
         self.value = &self.block.data[value_offset..value_offset + value_len];
 
-        // Move cuurent offset to the next entry
+        // Move current offset to the next entry
+        self.prev = self.current;
         self.current = value_offset + value_len;
     }
 
@@ -212,8 +296,6 @@ impl<'a> Iterator for BlockIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.valid() {
-            self.current = self.block.restarts;
-            self.restart_index = self.block.num_restarts;
             return None;
         }
 
@@ -234,13 +316,11 @@ impl<'a> Iterator for BlockIter<'a> {
 /// Returns the value of previous entry when calling `next_back`
 impl<'a> DoubleEndedIterator for BlockIter<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let original = self.current;
+        let original = self.prev;
         // Find the restart point that is before current offset.
         while self.get_restart_point(self.restart_index) >= original {
             if self.restart_index == 0 {
-                // No more entry. Set to the first entry.
-                self.current = 0;
-                self.restart_index = 0;
+                // No more entry.
                 return None;
             }
             self.restart_index -= 1;
@@ -249,10 +329,133 @@ impl<'a> DoubleEndedIterator for BlockIter<'a> {
         self.seek_to_restart_point(self.restart_index);
 
         // Parse the entry until it parses the original block entry.
-        while self.current <= original {
+        while self.current < original {
             self.parse_entry();
         }
 
         Some(self.value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLOCK_SAMPLE: [&[u8]; 6] = [
+        b"key111",
+        b"key112",
+        b"key123",
+        b"prefix_key1",
+        b"prefix_key2",
+        b"prefix_key3",
+    ];
+
+    #[test]
+    fn block_builder() {
+        let mut builder = BlockBuilder::new(3);
+        for i in BLOCK_SAMPLE.iter() {
+            builder = builder.add(i, i).unwrap();
+            assert!(builder.counter <= 3);
+            assert!(&builder.last_key == i);
+        }
+
+        assert_eq!(103, builder.size_estimate());
+
+        let block = builder.finish().unwrap();
+        assert_eq!(block.data.len(), 103);
+        assert_eq!(block.restarts, 91);
+    }
+
+    #[test]
+    fn builder_with_inconsist_key() {
+        let mut builder = BlockBuilder::new(3);
+        for i in BLOCK_SAMPLE.iter() {
+            builder = builder.add(i, i).unwrap();
+            assert!(builder.counter <= 3);
+            assert!(&builder.last_key == i);
+        }
+        let builder = builder.add(b"key0", b"key0");
+        assert!(builder.is_err());
+    }
+
+    #[test]
+    fn corrupted_block() {
+        let block = Block::from_raw(vec![0, 0, 0]);
+        assert!(block.is_err());
+
+        let mut data = vec![];
+        let restart_offset = vec![0u32, 10, 20];
+        for i in restart_offset.into_iter() {
+            data.extend_from_slice(&i.to_le_bytes());
+        }
+        // Append wrong NUM_RESTARTS
+        data.extend_from_slice(&4u32.to_le_bytes());
+        let block = Block::from_raw(data);
+        assert!(block.is_err());
+    }
+
+    #[test]
+    fn empty_block() {
+        let block = BlockBuilder::new(2).finish().unwrap();
+        let len = block.data.len();
+        let num_restarts = block.num_restarts;
+        let restarts = &block.data[block.restarts..len - 4];
+        assert_eq!(num_restarts, 1);
+        assert_eq!(restarts.len() / 4, 1);
+        assert_eq!(restarts, &[0, 0, 0, 0]);
+        let mut iter = block.iter();
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn empty_key_entry() {
+        let block = BlockBuilder::new(2)
+            .add(b"", b"value")
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut iter = block.iter();
+        assert_eq!(iter.seek(b""), Some(b"value".as_ref()));
+        assert_eq!(iter.key(), b"");
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn block_iter_seek() {
+        let mut builder = BlockBuilder::new(3);
+        for (idx, key) in BLOCK_SAMPLE.iter().enumerate() {
+            builder = builder.add(key, [idx as u8].as_ref()).unwrap();
+        }
+        let block = builder.finish().unwrap();
+        let mut iter = block.iter();
+
+        assert_eq!(iter.seek_to_last(), [5].as_ref());
+        assert_eq!(iter.key(), b"prefix_key3");
+
+        assert_eq!(iter.next(), None);
+        // The current entry is still the last entry.
+        assert_eq!(iter.key(), b"prefix_key3");
+
+        assert_eq!(iter.next_back(), Some([4].as_ref()));
+        assert_eq!(iter.key(), b"prefix_key2");
+
+        assert_eq!(iter.seek_to_first(), [0].as_ref());
+        assert_eq!(iter.key(), b"key111");
+
+        assert_eq!(iter.next_back(), None);
+        // The current entry is still the first entry.
+        assert_eq!(iter.key(), b"key111");
+
+        assert_eq!(iter.seek(b"key112"), Some([1].as_ref()));
+        assert_eq!(iter.key(), b"key112");
+
+        assert_eq!(iter.next_back(), Some([0].as_ref()));
+        assert_eq!(iter.key(), b"key111");
+
+        assert_eq!(iter.seek(b"key123"), Some([2].as_ref()));
+        assert_eq!(iter.key(), b"key123");
+
+        assert_eq!(iter.next(), Some([3].as_ref()));
+        assert_eq!(iter.key(), b"prefix_key1");
     }
 }

@@ -8,8 +8,8 @@ use crate::Error;
 
 const U32_SIZE: usize = size_of::<u32>();
 
-/// A `Block` is an immutable ordered list of key/value ENTRIES followed by a list of RESTARTS,
-/// terminated by a fixed u32 NUM_RESTARTS. Each Block entry shares key prefix with its preceding
+/// A Data `Block` is an immutable ordered list of key/value entries followed by a list of restart point offsets,
+/// terminated by a fixed u32 num_restarts. Each Block entry shares key prefix with its preceding
 /// key until a restart point reached. A block should contains at least one restart point.
 /// First restart point are always zero.
 ///

@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod hash;
 mod error;
 pub mod table;
 

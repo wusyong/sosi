@@ -4,7 +4,7 @@ pub fn hash32(data: &[u8], n: usize, seed: u32) -> u32 {
     let mut h: u32 = seed ^ ((n as u32).wrapping_mul(m));
 
     let mut pos: usize = 0;
-    while pos + 4 <= n as usize {
+    while pos + 4 <= n {
         let mut w: [u8; 4] = Default::default();
         w.copy_from_slice(&data[pos..pos + 4]);
 
@@ -16,7 +16,7 @@ pub fn hash32(data: &[u8], n: usize, seed: u32) -> u32 {
     }
 
     if let Some(b) = remain_bytes(data, n, pos) {
-        h += b;
+        h = h.wrapping_add(b);
         h = h.wrapping_mul(m);
         h ^= h >> r;
     }

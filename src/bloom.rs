@@ -1,7 +1,7 @@
 use crate::hash::hash32;
 
 pub struct BloomFilterPolicy {
-    hash_fn_num: usize,
+    hash_fn_num: u8,
     bits_per_key: usize,
 }
 
@@ -11,7 +11,7 @@ fn bloom_hash(key: &[u8]) -> u32 {
 
 impl BloomFilterPolicy {
     pub fn new(bits_per_key: usize) -> Self {
-        let mut hash_fn_num: f32 = bits_per_key as f32 * 0.69;
+        let mut hash_fn_num = bits_per_key as f32 * 0.69;
         if hash_fn_num < 1.0 {
             hash_fn_num = 1.0;
         }
@@ -20,14 +20,13 @@ impl BloomFilterPolicy {
         }
 
         BloomFilterPolicy {
-            hash_fn_num: hash_fn_num as usize,
+            hash_fn_num: hash_fn_num as u8,
             bits_per_key,
         }
     }
-    pub fn create_filter(&self, keys: &Vec<String>, key_size: usize, filter: &Vec<u32>) -> Vec<u32> {
-        let mut result: Vec<u32> = filter.clone();
+    pub fn create_filter(&self, keys: &[Vec<u8>]) -> Vec<u8> {
         // Calculate bloom filter size
-        let mut bits: usize = key_size * self.bits_per_key as usize;
+        let mut bits: usize = keys.len() * self.bits_per_key;
 
         if bits < 64 {
             bits = 64;
@@ -36,35 +35,30 @@ impl BloomFilterPolicy {
         let bytes: usize = (bits + 7) / 8;
         bits = bytes * 8;
 
-        let init_size: usize = result.len();
 
         // initialize filter
-        result.reserve(bytes);
-        for _i in init_size..(init_size + bytes) {
-            result.push(0);
-        }
-        result.push(self.hash_fn_num as u32);
-        let filter: &mut [u32] = &mut result[init_size..];
+        let mut filter = vec![0u8; bytes + 1];
+        filter[bytes] = self.hash_fn_num;
 
-        for i in 0..key_size {
-            let mut h: u32 = bloom_hash(keys[i].as_bytes());
-            let delta: u32 = (h >> 17) | (h << 15);
-            for _j in 0..self.hash_fn_num {
-                let bitpos: usize = h as usize % bits;
-                filter[(bitpos / 8) as usize] |= 1 << (bitpos % 8);
+        for key in keys {
+            let mut h = bloom_hash(key);
+            let delta = (h >> 17) | (h << 15);
+            for _ in 0..self.hash_fn_num {
+                let bitpos = h as usize % bits;
+                filter[bitpos / 8] |= 1 << (bitpos % 8);
                 h = h.wrapping_add(delta);
             }
         }
 
-        result
+        filter
     }
-    pub fn key_may_match(&self, key: &str, bloom_filter: &Vec<u32>) -> bool {
+    pub fn key_may_match(&self, key: &[u8], bloom_filter: &[u8]) -> bool {
         let len: usize = bloom_filter.len();
         if len < 2 {
             return false;
         }
 
-        let filter: &[u32] = &bloom_filter[0..len - 1];
+        let filter = &bloom_filter[0..len - 1];
         let bits: usize = (len - 1) * 8;
 
         let hash_fn_num: usize = bloom_filter[len - 1] as usize;
@@ -73,10 +67,10 @@ impl BloomFilterPolicy {
             return true;
         }
 
-        let mut h: u32 = bloom_hash(key.as_bytes());
+        let mut h: u32 = bloom_hash(key);
         let delta: u32 = (h >> 17) | (h << 15);
         for _j in 0..hash_fn_num {
-            let bitpos: usize = h as usize % bits;
+            let bitpos = h as usize % bits;
             if (filter[bitpos / 8] & (1 << (bitpos % 8))) == 0 {
                 return false;
             }
@@ -93,42 +87,40 @@ mod test {
     #[test]
     fn basic_usage() {
         let policy: BloomFilterPolicy = BloomFilterPolicy::new(10);
-        let mut bloom_filter: Vec<u32> = Vec::new();
-        let keys: Vec<String> = vec![String::from("hello"), String::from("world")];
+        let keys = vec![String::from("hello").into_bytes(), String::from("world").into_bytes()];
 
-        bloom_filter = policy.create_filter(&keys, 2, &bloom_filter);
-        assert_eq!(policy.key_may_match("hello", &bloom_filter), true);
-        assert_eq!(policy.key_may_match("world", &bloom_filter), true);
-        assert_eq!(policy.key_may_match("helllo", &bloom_filter), false);
-        assert_eq!(policy.key_may_match("", &bloom_filter), false);
-        assert_eq!(policy.key_may_match("foo", &bloom_filter), false);
+        let bloom_filter = policy.create_filter(&keys);
+        assert_eq!(policy.key_may_match("hello".as_bytes(), &bloom_filter), true);
+        assert_eq!(policy.key_may_match("world".as_bytes(), &bloom_filter), true);
+        assert_eq!(policy.key_may_match("helllo".as_bytes(), &bloom_filter), false);
+        assert_eq!(policy.key_may_match("".as_bytes(), &bloom_filter), false);
+        assert_eq!(policy.key_may_match("foo".as_bytes(), &bloom_filter), false);
     }
 
     #[test]
     fn empty_filter() {
         let policy: BloomFilterPolicy = BloomFilterPolicy::new(10);
-        let mut bloom_filter: Vec<u32> = Vec::new();
 
-        bloom_filter = policy.create_filter(&Vec::new(), 0, &bloom_filter);
-        assert_eq!(policy.key_may_match("hello", &bloom_filter), false);
-        assert_eq!(policy.key_may_match("world", &bloom_filter), false);
+        let bloom_filter = policy.create_filter(&Vec::new());
+        assert_eq!(policy.key_may_match("hello".as_bytes(), &bloom_filter), false);
+        assert_eq!(policy.key_may_match("world".as_bytes(), &bloom_filter), false);
     }
 
     #[test]
     fn varying_length() {
         let policy: BloomFilterPolicy = BloomFilterPolicy::new(10);
-        let mut bloom_filter: Vec<u32> = Vec::new();
-        let mut keys: Vec<String> = Vec::new();
+        let mut bloom_filter = Vec::new();
+        let mut keys = Vec::new();
         let mut mediocre_filters: u32 = 0;
         let mut good_filters: u32 = 0;
 
-        fn reset(keys: &mut Vec<String>, bloom_filter: &mut Vec<u32>) {
+        fn reset(keys: &mut Vec<Vec<u8>>, bloom_filter: &mut Vec<u8>) {
             keys.clear();
             bloom_filter.clear();
         }
 
-        fn gen_key(i: u32) -> u32 {
-            u32::from_le_bytes(i.to_be_bytes())
+        fn gen_key(i: u32) -> [u8; 4] {
+            i.to_le_bytes()
         }
 
         fn next_length(length: u32) -> u32 {
@@ -145,11 +137,11 @@ mod test {
             return len;
         }
 
-        fn false_positive_rate(policy: &BloomFilterPolicy, bloom_filter: &Vec<u32>) -> f64 {
+        fn false_positive_rate(policy: &BloomFilterPolicy, bloom_filter: &[u8]) -> f64 {
             let mut result: f64 = 0.0;
 
             for i in 0..10000 {
-                if policy.key_may_match(gen_key(i + 1000000000).to_string().as_str(), bloom_filter)
+                if policy.key_may_match(&gen_key(i + 1000000000), bloom_filter)
                 {
                     result += 1.0;
                 }
@@ -162,24 +154,24 @@ mod test {
             reset(&mut keys, &mut bloom_filter);
 
             for i in 0..length {
-                let key: String = gen_key(i).to_string();
-                keys.push(key);
+                let key = gen_key(i);
+                keys.push(key.to_vec());
             }
 
-            bloom_filter = policy.create_filter(&keys, keys.len(), &bloom_filter);
+            let bloom_filter = policy.create_filter(&keys);
             assert_eq!(bloom_filter.len() <= (length as usize * 10 / 8) + 40, true);
 
             // all keys added in filter must match
             for i in 0..length {
                 assert_eq!(
-                    policy.key_may_match(gen_key(i).to_string().as_str(), &bloom_filter),
+                    policy.key_may_match(&gen_key(i), &bloom_filter),
                     true
                 );
             }
 
             // false positive rate must lower than 0.02
             let rate: f64 = false_positive_rate(&policy, &bloom_filter);
-            assert_eq!(rate <= 0.02, true);
+            assert!(rate <= 0.02);
 
             if rate > 0.0125 {
                 mediocre_filters += 1;

@@ -13,10 +13,14 @@ pub enum Error {
     //},
     #[error("invalid block creation.")]
     InvalidBlock,
-    #[error("[Block Builder] Inserted Key should be greater than previous key.")]
+    #[error("Inserted Key should be greater than previous key.")]
     InvalidKey,
     #[error("the cache cannot be sharded into too many pieces. Maximum is 20.")]
     TooManyShards,
+    #[error("Fail to perform varint conversion on {0}")]
+    VarintConversion(&'static str),
+    #[error(transparent)]
+    FmtError(#[from] std::io::Error),
 }
 
 #[derive(Debug)]

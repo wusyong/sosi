@@ -1,4 +1,4 @@
-//! SST Table is a sorted map from strings to strings. Tables are immutable and persistent. 
+//! SST Table is a sorted map from strings to strings. Tables are immutable and persistent.
 //!
 //! It can be safely accessed from multiple threads without external synchronization.
 //! A Table contains one or more data blocks, an optional filter block, a metaindex
@@ -61,7 +61,7 @@
 //!
 //! Here's an example of how each entry shares key prefix with previous key. Say we have a data
 //! block with `restart_interval = 2`. If we have three key/value as follow:
-//! 
+//!
 //! - Entry one  : key="deck", value="v1"
 //! - Entry two  : key="dock", value="v2"
 //! - Entry three: key="duck", value="v3"
@@ -120,5 +120,7 @@
 //! ```
 
 mod block;
+mod table;
 
 pub use block::{Block, BlockBuilder, BlockIter};
+pub use table::TableBuilder;

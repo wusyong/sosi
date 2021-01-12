@@ -8,6 +8,8 @@ use crate::Error;
 
 const U32_SIZE: usize = size_of::<u32>();
 
+pub type BlockContents = Vec<u8>;
+
 /// A Data `Block` is an immutable ordered list of key/value entries followed by a list of restart point offsets,
 /// terminated by a fixed u32 num_restarts. Each Block entry shares key prefix with its preceding
 /// key until a restart point reached. A block should contains at least one restart point.
@@ -27,7 +29,7 @@ pub struct Block {
 impl Block {
     // TODO add another vesion with checks?
     /// Create a Black from raw bytes.
-    pub fn from_raw(content: Vec<u8>) -> Result<Self, Error> {
+    pub fn new(content: BlockContents) -> Result<Self, Error> {
         let len = content.len();
         if len < U32_SIZE {
             return Err(Error::InvalidBlock);
@@ -89,11 +91,15 @@ impl BlockBuilder {
         }
     }
 
+    pub fn last_key(&self) -> &[u8] {
+        &self.last_key
+    }
+
     pub fn size_estimate(&self) -> usize {
         self.buffer.len() + self.restarts.len() * 4 + U32_SIZE
     }
 
-    pub fn add(mut self, key: &[u8], value: &[u8]) -> Result<Self, Error> {
+    pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         if !self.buffer.is_empty() && key.cmp(&self.last_key) != Ordering::Greater {
             return Err(Error::InvalidKey);
         }
@@ -130,10 +136,10 @@ impl BlockBuilder {
         self.last_key.extend_from_slice(key);
         self.counter += 1;
 
-        Ok(self)
+        Ok(())
     }
 
-    pub fn finish(mut self) -> Result<Block, Error> {
+    pub fn finish(mut self) -> BlockContents {
         self.buffer.reserve(self.restarts.len() * 4 + 4);
 
         // Add RESTARTS
@@ -144,7 +150,7 @@ impl BlockBuilder {
         // Add N_RESTARTS
         self.buffer.extend_from_slice(&restarts_len.to_le_bytes());
 
-        Block::from_raw(self.buffer)
+        self.buffer
     }
 }
 
@@ -314,6 +320,7 @@ impl<'a> Iterator for BlockIter<'a> {
 }
 
 /// Returns the value of previous entry when calling `next_back`
+/// TODO just name it prev
 impl<'a> DoubleEndedIterator for BlockIter<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let original = self.prev;
@@ -354,14 +361,14 @@ mod tests {
     fn block_builder() {
         let mut builder = BlockBuilder::new(3);
         for i in BLOCK_SAMPLE.iter() {
-            builder = builder.add(i, i).unwrap();
+            builder.add(i, i).unwrap();
             assert!(builder.counter <= 3);
             assert!(&builder.last_key == i);
         }
 
         assert_eq!(103, builder.size_estimate());
 
-        let block = builder.finish().unwrap();
+        let block = Block::new(builder.finish()).unwrap();
         assert_eq!(block.data.len(), 103);
         assert_eq!(block.restarts, 91);
     }
@@ -370,7 +377,7 @@ mod tests {
     fn builder_with_inconsist_key() {
         let mut builder = BlockBuilder::new(3);
         for i in BLOCK_SAMPLE.iter() {
-            builder = builder.add(i, i).unwrap();
+            builder.add(i, i).unwrap();
             assert!(builder.counter <= 3);
             assert!(&builder.last_key == i);
         }
@@ -380,7 +387,7 @@ mod tests {
 
     #[test]
     fn corrupted_block() {
-        let block = Block::from_raw(vec![0, 0, 0]);
+        let block = Block::new(vec![0, 0, 0]);
         assert!(block.is_err());
 
         let mut data = vec![];
@@ -390,13 +397,13 @@ mod tests {
         }
         // Append wrong NUM_RESTARTS
         data.extend_from_slice(&4u32.to_le_bytes());
-        let block = Block::from_raw(data);
+        let block = Block::new(data);
         assert!(block.is_err());
     }
 
     #[test]
     fn empty_block() {
-        let block = BlockBuilder::new(2).finish().unwrap();
+        let block = Block::new(BlockBuilder::new(2).finish()).unwrap();
         let len = block.data.len();
         let num_restarts = block.num_restarts;
         let restarts = &block.data[block.restarts..len - 4];
@@ -409,11 +416,9 @@ mod tests {
 
     #[test]
     fn empty_key_entry() {
-        let block = BlockBuilder::new(2)
-            .add(b"", b"value")
-            .unwrap()
-            .finish()
-            .unwrap();
+        let mut block = BlockBuilder::new(2);
+        block.add(b"", b"value").unwrap();
+        let block = Block::new(block.finish()).unwrap();
         let mut iter = block.iter();
         assert_eq!(iter.seek(b""), Some(b"value".as_ref()));
         assert_eq!(iter.key(), b"");
@@ -424,9 +429,9 @@ mod tests {
     fn block_iter_seek() {
         let mut builder = BlockBuilder::new(3);
         for (idx, key) in BLOCK_SAMPLE.iter().enumerate() {
-            builder = builder.add(key, [idx as u8].as_ref()).unwrap();
+            builder.add(key, [idx as u8].as_ref()).unwrap();
         }
-        let block = builder.finish().unwrap();
+        let block = Block::new(builder.finish()).unwrap();
         let mut iter = block.iter();
 
         assert_eq!(iter.seek_to_last(), [5].as_ref());

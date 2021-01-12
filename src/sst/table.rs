@@ -39,7 +39,7 @@ impl<T: Write> TableBuilder<T> {
             block_restart_interval,
             last_key: Vec::new(),
             data_block: BlockBuilder::new(block_restart_interval),
-            index_block: BlockBuilder::new(block_restart_interval),
+            index_block: BlockBuilder::new(1),
         }
     }
 
@@ -122,7 +122,7 @@ impl<T: Write> TableBuilder<T> {
         let metaindex_handle = self.write_block(metaindex)?;
 
         // Write index block
-        let mut index_block = BlockBuilder::new(self.block_restart_interval);
+        let mut index_block = BlockBuilder::new(1);
         swap(&mut index_block, &mut self.index_block);
         let index_block = index_block.finish();
         let index_handle = self.write_block(index_block)?;

@@ -1,5 +1,6 @@
 use crate::hash::hash32;
 
+#[derive(Debug, Clone)]
 pub struct BloomFilterPolicy {
     hash_fn_num: u8,
     bits_per_key: usize,
@@ -24,7 +25,7 @@ impl BloomFilterPolicy {
             bits_per_key,
         }
     }
-    pub fn create_filter(&self, keys: &[Vec<u8>]) -> Vec<u8> {
+    pub fn create_filter(&self, keys: &[&[u8]]) -> Vec<u8> {
         // Calculate bloom filter size
         let mut bits: usize = keys.len() * self.bits_per_key;
 
@@ -34,7 +35,6 @@ impl BloomFilterPolicy {
 
         let bytes: usize = (bits + 7) / 8;
         bits = bytes * 8;
-
 
         // initialize filter
         let mut filter = vec![0u8; bytes + 1];
@@ -87,12 +87,23 @@ mod test {
     #[test]
     fn basic_usage() {
         let policy: BloomFilterPolicy = BloomFilterPolicy::new(10);
-        let keys = vec![String::from("hello").into_bytes(), String::from("world").into_bytes()];
+        let k1 = String::from("hello");
+        let k2 = String::from("world");
+        let keys = vec![k1.as_bytes(), k2.as_bytes()];
 
         let bloom_filter = policy.create_filter(&keys);
-        assert_eq!(policy.key_may_match("hello".as_bytes(), &bloom_filter), true);
-        assert_eq!(policy.key_may_match("world".as_bytes(), &bloom_filter), true);
-        assert_eq!(policy.key_may_match("helllo".as_bytes(), &bloom_filter), false);
+        assert_eq!(
+            policy.key_may_match("hello".as_bytes(), &bloom_filter),
+            true
+        );
+        assert_eq!(
+            policy.key_may_match("world".as_bytes(), &bloom_filter),
+            true
+        );
+        assert_eq!(
+            policy.key_may_match("helllo".as_bytes(), &bloom_filter),
+            false
+        );
         assert_eq!(policy.key_may_match("".as_bytes(), &bloom_filter), false);
         assert_eq!(policy.key_may_match("foo".as_bytes(), &bloom_filter), false);
     }
@@ -102,8 +113,14 @@ mod test {
         let policy: BloomFilterPolicy = BloomFilterPolicy::new(10);
 
         let bloom_filter = policy.create_filter(&Vec::new());
-        assert_eq!(policy.key_may_match("hello".as_bytes(), &bloom_filter), false);
-        assert_eq!(policy.key_may_match("world".as_bytes(), &bloom_filter), false);
+        assert_eq!(
+            policy.key_may_match("hello".as_bytes(), &bloom_filter),
+            false
+        );
+        assert_eq!(
+            policy.key_may_match("world".as_bytes(), &bloom_filter),
+            false
+        );
     }
 
     #[test]
@@ -114,7 +131,7 @@ mod test {
         let mut mediocre_filters: u32 = 0;
         let mut good_filters: u32 = 0;
 
-        fn reset(keys: &mut Vec<Vec<u8>>, bloom_filter: &mut Vec<u8>) {
+        fn reset(keys: &mut Vec<&[u8]>, bloom_filter: &mut Vec<u8>) {
             keys.clear();
             bloom_filter.clear();
         }
@@ -141,8 +158,7 @@ mod test {
             let mut result: f64 = 0.0;
 
             for i in 0..10000 {
-                if policy.key_may_match(&gen_key(i + 1000000000), bloom_filter)
-                {
+                if policy.key_may_match(&gen_key(i + 1000000000), bloom_filter) {
                     result += 1.0;
                 }
             }
@@ -150,23 +166,20 @@ mod test {
         }
 
         let mut length: u32 = 1;
+        let gen_keys = (0..10000).map(|i| gen_key(i)).collect::<Vec<_>>();
         while length < 10000 {
             reset(&mut keys, &mut bloom_filter);
 
             for i in 0..length {
-                let key = gen_key(i);
-                keys.push(key.to_vec());
+                keys.push(&gen_keys[i as usize]);
             }
 
             let bloom_filter = policy.create_filter(&keys);
-            assert_eq!(bloom_filter.len() <= (length as usize * 10 / 8) + 40, true);
+            assert!(bloom_filter.len() <= (length as usize * 10 / 8) + 40);
 
             // all keys added in filter must match
             for i in 0..length {
-                assert_eq!(
-                    policy.key_may_match(&gen_key(i), &bloom_filter),
-                    true
-                );
+                assert_eq!(policy.key_may_match(&gen_key(i), &bloom_filter), true);
             }
 
             // false positive rate must lower than 0.02

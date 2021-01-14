@@ -1,7 +1,7 @@
-pub mod cache;
-pub mod hash;
-mod error;
 pub mod bloom;
+pub mod cache;
+mod error;
+pub mod hash;
 pub mod sst;
 
 pub use error::Error;

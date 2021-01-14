@@ -4,6 +4,7 @@ use std::mem::size_of;
 
 use integer_encoding::{VarInt, VarIntWriter};
 
+use crate::bloom::BloomFilterPolicy;
 use crate::Error;
 
 const U32_SIZE: usize = size_of::<u32>();
@@ -344,9 +345,142 @@ impl<'a> DoubleEndedIterator for BlockIter<'a> {
     }
 }
 
+const DEFAULT_BITS_PER_KEY: usize = 10;
+const FILTER_BASE_LOG: usize = 11;
+
+pub struct FilterBlockBuilder<'a> {
+    policy: BloomFilterPolicy,
+    keys: Vec<&'a [u8]>,
+    /// Filter block data
+    data: Vec<u8>,
+    /// Offset of every filter data
+    filter_offsets: Vec<usize>,
+}
+
+impl<'a> FilterBlockBuilder<'a> {
+    pub fn new() -> Self {
+        FilterBlockBuilder {
+            policy: BloomFilterPolicy::new(DEFAULT_BITS_PER_KEY),
+            keys: Vec::new(),
+            data: Vec::new(),
+            filter_offsets: Vec::new(),
+        }
+    }
+
+    pub fn add_key(&mut self, key: &'a [u8]) {
+        self.keys.push(key);
+    }
+
+    /// Create filter data for the data block with given `block_offset`
+    pub fn start_block(&mut self, block_offset: u32) {
+        // Filter index handles data range from [i*FILTER_BASE..(i+1)*FILTER_BASE]
+        let filter_index = block_offset as usize >> FILTER_BASE_LOG;
+        assert!(filter_index >= self.filter_offsets.len());
+
+        while filter_index > self.filter_offsets.len() {
+            self.generate_filter();
+        }
+    }
+
+    /// Append filter block trailer and return the filter block in bytes.
+    pub fn finish(mut self) -> Vec<u8> {
+        // Consume remaining keys
+        if !self.keys.is_empty() {
+            self.generate_filter();
+        }
+
+        // Append array of per-filter offsets
+        let array_offset = self.data.len() as u32;
+        for offset in self.filter_offsets {
+            self.data.extend_from_slice(&(offset as u32).to_le_bytes());
+        }
+
+        // Append filter trailer offset
+        self.data
+            .extend_from_slice(&(array_offset as u32).to_le_bytes());
+
+        // Append base lg
+        self.data.push(FILTER_BASE_LOG as u8);
+
+        self.data
+    }
+
+    /// Convert `keys` to encoded filter vector
+    fn generate_filter(&mut self) {
+        self.filter_offsets.push(self.data.len());
+        if self.keys.is_empty() {
+            return;
+        }
+
+        let filter = self.policy.create_filter(&self.keys);
+        self.data.extend_from_slice(&filter);
+        self.keys.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FilterBlockReader {
+    policy: BloomFilterPolicy,
+    data: Vec<u8>,
+    /// Beginning of the offset array
+    offset: usize,
+    /// Number of entries in offset array
+    num: usize,
+    base_lg: u8,
+}
+
+impl FilterBlockReader {
+    pub fn new(data: Vec<u8>) -> Self {
+        let n = data.len();
+        // 1 byte for base_lg_ and 4 for start of offset array
+        assert!(n >= 5);
+        let base_lg = data[n - 1];
+        let offset =
+            u32::from_le_bytes([data[n - 5], data[n - 4], data[n - 3], data[n - 2]]) as usize;
+        assert!(offset <= n - 5);
+        let num = (n - 5 - offset) / 4;
+
+        Self {
+            policy: BloomFilterPolicy::new(DEFAULT_BITS_PER_KEY),
+            data,
+            offset,
+            num,
+            base_lg,
+        }
+    }
+
+    pub fn key_may_match(&self, block_offset: usize, key: &[u8]) -> bool {
+        let index = block_offset >> self.base_lg;
+        if index < self.num {
+            let offset = self.offset + index * 4;
+            let start = u32::from_le_bytes([
+                self.data[offset],
+                self.data[offset + 1],
+                self.data[offset + 2],
+                self.data[offset + 3],
+            ]) as usize;
+            let end = u32::from_le_bytes([
+                self.data[offset + 4],
+                self.data[offset + 5],
+                self.data[offset + 6],
+                self.data[offset + 7],
+            ]) as usize;
+
+            assert!(start <= end);
+            assert!(end <= self.offset);
+
+            return self.policy.key_may_match(key, &self.data[start..end]);
+        }
+
+        true // Errors are treated as potential matches.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Block tests
 
     const BLOCK_SAMPLE: [&[u8]; 6] = [
         b"key111",
@@ -462,5 +596,78 @@ mod tests {
 
         assert_eq!(iter.next(), Some([3].as_ref()));
         assert_eq!(iter.key(), b"prefix_key1");
+    }
+
+    // Filter block tests
+
+    #[test]
+    fn empty_filter_builder() {
+        let builder = FilterBlockBuilder::new().finish();
+        assert_eq!(vec![0, 0, 0, 0, FILTER_BASE_LOG as u8], builder);
+
+        let reader = FilterBlockReader::new(builder);
+        assert!(reader.key_may_match(0, "foo".as_bytes()));
+        assert!(reader.key_may_match(10000, "foo".as_bytes()));
+    }
+
+    #[test]
+    fn single_chunk_filter() {
+        let mut builder = FilterBlockBuilder::new();
+        builder.start_block(100);
+        builder.add_key("foo".as_bytes());
+        builder.add_key("bar".as_bytes());
+        builder.add_key("box".as_bytes());
+        builder.start_block(200);
+        builder.add_key("box".as_bytes());
+        builder.start_block(300);
+        builder.add_key("hello".as_bytes());
+        let block = FilterBlockReader::new(builder.finish());
+        assert!(block.key_may_match(100, "foo".as_bytes()));
+        assert!(block.key_may_match(100, "bar".as_bytes()));
+        assert!(block.key_may_match(100, "box".as_bytes()));
+        assert!(block.key_may_match(100, "hello".as_bytes()));
+        assert!(block.key_may_match(100, "foo".as_bytes()));
+        assert!(!block.key_may_match(100, "missing".as_bytes())); // No match
+        assert!(!block.key_may_match(100, "other".as_bytes()));
+    }
+
+    #[test]
+    fn multiple_chunk_filter() {
+        let mut builder = FilterBlockBuilder::new();
+        // first filter
+        builder.start_block(0);
+        builder.add_key("foo".as_bytes());
+        builder.start_block(2000);
+        builder.add_key("bar".as_bytes());
+        // second filter
+        builder.start_block(3100);
+        builder.add_key("box".as_bytes());
+        // third filter is empty
+        // last filter
+        builder.start_block(9000);
+        builder.add_key("box".as_bytes());
+        builder.add_key("hello".as_bytes());
+
+        let block = FilterBlockReader::new(builder.finish());
+        // check first filter
+        assert_eq!(block.key_may_match(0, "foo".as_bytes()), true);
+        assert_eq!(block.key_may_match(2000, "bar".as_bytes()), true);
+        assert_eq!(block.key_may_match(0, "box".as_bytes()), false);
+        assert_eq!(block.key_may_match(0, "hello".as_bytes()), false);
+        // check second filter
+        assert_eq!(block.key_may_match(3100, "foo".as_bytes()), false);
+        assert_eq!(block.key_may_match(3100, "bar".as_bytes()), false);
+        assert_eq!(block.key_may_match(3100, "box".as_bytes()), true);
+        assert_eq!(block.key_may_match(3100, "hello".as_bytes()), false);
+        // check third filter
+        assert_eq!(block.key_may_match(4100, "foo".as_bytes()), false);
+        assert_eq!(block.key_may_match(4100, "bar".as_bytes()), false);
+        assert_eq!(block.key_may_match(4100, "box".as_bytes()), false);
+        assert_eq!(block.key_may_match(4100, "hello".as_bytes()), false);
+        // check last filter
+        assert_eq!(block.key_may_match(9000, "foo".as_bytes()), false);
+        assert_eq!(block.key_may_match(9000, "bar".as_bytes()), false);
+        assert_eq!(block.key_may_match(9000, "box".as_bytes()), true);
+        assert_eq!(block.key_may_match(9000, "hello".as_bytes()), true);
     }
 }

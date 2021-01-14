@@ -29,6 +29,7 @@ pub struct TableBuilder<T: Write> {
 }
 
 impl<T: Write> TableBuilder<T> {
+    // TODO missing params: compression type, filter policy
     /// Create a new TableBuilder.
     pub fn new(file: T, block_restart_interval: usize, block_size: usize) -> Self {
         Self {

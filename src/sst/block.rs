@@ -372,7 +372,7 @@ impl<'a> FilterBlockBuilder<'a> {
     }
 
     /// Create filter data for the data block with given `block_offset`
-    pub fn start_block(&mut self, block_offset: u32) {
+    pub fn start_block(&mut self, block_offset: usize) {
         // Filter index handles data range from [i*FILTER_BASE..(i+1)*FILTER_BASE]
         let filter_index = block_offset as usize >> FILTER_BASE_LOG;
         assert!(filter_index >= self.filter_offsets.len());

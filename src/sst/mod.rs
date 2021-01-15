@@ -154,5 +154,5 @@
 mod block;
 mod table;
 
-pub use block::{Block, BlockBuilder, BlockIter};
+pub use block::{Block, BlockBuilder, BlockIter, FilterBlockBuilder, FilterBlockReader};
 pub use table::TableBuilder;

@@ -5,13 +5,13 @@ use std::mem::swap;
 use crc32fast::Hasher;
 use integer_encoding::{VarInt, VarIntWriter};
 
-use crate::sst::BlockBuilder;
+use crate::sst::{BlockBuilder, FilterBlockBuilder};
 use crate::Error;
 
 /// Builder to construct new SST Table and save to .sst file. It groups entries into blocks,
 /// calculacalculating checksum, and bloom filters.
 /// Data blocks, metaindex block, and index block are built by `Block` module.
-pub struct TableBuilder<T: Write> {
+pub struct TableBuilder<'a, T: Write> {
     file: T,
     /// Length of written data
     offset: usize,
@@ -25,13 +25,19 @@ pub struct TableBuilder<T: Write> {
     last_key: Vec<u8>,
 
     data_block: BlockBuilder,
+    filter_block: Option<FilterBlockBuilder<'a>>,
     index_block: BlockBuilder,
 }
 
-impl<T: Write> TableBuilder<T> {
-    // TODO missing params: compression type, filter policy
+impl<'a, T: Write> TableBuilder<'a, T> {
+    // TODO missing params: compression type
     /// Create a new TableBuilder.
-    pub fn new(file: T, block_restart_interval: usize, block_size: usize) -> Self {
+    pub fn new(file: T, block_restart_interval: usize, block_size: usize, filter: bool) -> Self {
+        let filter_block = if filter {
+            Some(FilterBlockBuilder::new())
+        } else {
+            None
+        };
         Self {
             file,
             offset: 0,
@@ -40,6 +46,7 @@ impl<T: Write> TableBuilder<T> {
             block_restart_interval,
             last_key: Vec::new(),
             data_block: BlockBuilder::new(block_restart_interval),
+            filter_block,
             index_block: BlockBuilder::new(1),
         }
     }
@@ -47,12 +54,14 @@ impl<T: Write> TableBuilder<T> {
     /// Add a key/value pair to the table. The key must be greate than the previous one.
     /// If the data block reaches the limit, it will write and flush to the file. It also add a
     /// entry index to the index block.
-    pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    pub fn add(&mut self, key: &'a [u8], value: &[u8]) -> Result<(), Error> {
         if !self.last_key.is_empty() {
             return Err(Error::InvalidKey);
         }
 
-        // TODO write filter block
+        if let Some(filter) = self.filter_block.as_mut() {
+            filter.add_key(key);
+        }
 
         self.num_entries += 1;
         self.data_block.add(key, value)?;
@@ -79,7 +88,9 @@ impl<T: Write> TableBuilder<T> {
         let handle_encoding = handle.encode();
 
         self.index_block.add(&separator, &handle_encoding)?;
-        // TODO filter block
+        if let Some(filter) = self.filter_block.as_mut() {
+            filter.start_block(self.offset);
+        }
         Ok(())
     }
 
@@ -114,9 +125,16 @@ impl<T: Write> TableBuilder<T> {
         }
 
         // Create metaindex block
-        let metaindex_block = BlockBuilder::new(self.block_restart_interval);
+        let mut metaindex_block = BlockBuilder::new(self.block_restart_interval);
 
-        // TODO filter block
+        // Write filter block and add to metaindex block
+        if let Some(filter) = self.filter_block.take() {
+            let filter_key = "filter.BloomFilter".as_bytes();
+            let filter_data = filter.finish();
+            let filter_handle = self.write_block(filter_data)?.encode();
+
+            metaindex_block.add(filter_key, &filter_handle)?;
+        }
 
         // Write metaindex block
         let metaindex = metaindex_block.finish();
